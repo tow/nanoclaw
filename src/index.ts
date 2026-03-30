@@ -281,7 +281,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
+  // Extract thread context from the latest message for session keying.
+  // For top-level messages: threadId is undefined, messageId is the msg's own ts.
+  // For thread replies: threadId is the parent's ts.
+  // Session key uses threadId || messageId so that:
+  //   - Top-level saves under its own ts (which becomes thread_ts for replies)
+  //   - Thread replies look up under thread_ts (= parent's ts) → finds the session
+  const lastMsg = missedMessages[missedMessages.length - 1];
+  const threadId = lastMsg?.thread_id || undefined;
+  const messageId = lastMsg?.id || undefined;
+
+  const output = await runAgent(group, prompt, chatJid, threadId, messageId, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
@@ -338,15 +348,19 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
+  threadId?: string,
+  messageId?: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  // Use thread-based sessions: thread replies resume, top-level messages start fresh
-  const lastMessage = getMessagesSince(chatJid, '', ASSISTANT_NAME, 1).pop();
-  const threadKey = lastMessage?.thread_id
-    ? `${group.folder}:${lastMessage.thread_id}`
-    : undefined;
-  const sessionId = threadKey ? sessions[threadKey] : undefined;
+  // Thread-aware session keying:
+  // - threadId (thread_ts) is set for thread replies, points to parent msg
+  // - messageId (ts) is the message's own id, becomes thread_ts for future replies
+  // Using threadId || messageId means both the parent and replies share the same key.
+  const sessionKey = (threadId || messageId)
+    ? `${group.folder}:${threadId || messageId}`
+    : group.folder;
+  const sessionId = sessions[sessionKey];
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -378,9 +392,8 @@ async function runAgent(
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
-          const saveKey = threadKey || group.folder;
-          sessions[saveKey] = output.newSessionId;
-          setSession(saveKey, output.newSessionId);
+          sessions[sessionKey] = output.newSessionId;
+          setSession(sessionKey, output.newSessionId);
         }
         await onOutput(output);
       }
@@ -403,9 +416,8 @@ async function runAgent(
     );
 
     if (output.newSessionId) {
-      const saveKey = threadKey || group.folder;
-      sessions[saveKey] = output.newSessionId;
-      setSession(saveKey, output.newSessionId);
+      sessions[sessionKey] = output.newSessionId;
+      setSession(sessionKey, output.newSessionId);
     }
 
     if (output.status === 'error') {
