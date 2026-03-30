@@ -402,7 +402,9 @@ async function runQuery(
         ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
         : undefined,
       allowedTools: [
-        'Bash',
+        // Bash restricted to git and validation only — no arbitrary shell
+        'Bash(git *)',
+        'Bash(python3 scripts/validate.py *)',
         'Read', 'Write', 'Edit', 'Glob', 'Grep',
         'WebSearch', 'WebFetch',
         'Task', 'TaskOutput', 'TaskStop',

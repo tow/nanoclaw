@@ -269,10 +269,8 @@ async function buildContainerArgs(
     args.push('-e', 'GIT_CONFIG_GLOBAL=/tmp/container-gitconfig');
   }
 
-  // Fallback: inject Anthropic API key directly when OneCLI is unavailable
-  if (process.env.ANTHROPIC_API_KEY) {
-    args.push('-e', `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY}`);
-  }
+  // Anthropic API key is injected by OneCLI gateway (HTTPS proxy).
+  // Never pass it as an environment variable — it would be visible to the agent.
 
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
