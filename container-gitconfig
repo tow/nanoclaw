@@ -1,0 +1,7 @@
+[credential]
+	helper = /opt/git-credential-github-app.sh
+[safe]
+	directory = /workspace/group
+[user]
+	name = ArcticRex CRM Bot
+	email = bot@arcticrex.com

@@ -253,9 +253,25 @@ async function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
-  // Inject Anthropic API key directly (no OneCLI)
+
+  // GitHub App credentials for git push (credential helper mints tokens on demand)
+  if (process.env.GITHUB_APP_ID) {
+    args.push('-e', `GITHUB_APP_ID=${process.env.GITHUB_APP_ID}`);
+    args.push('-e', `GITHUB_APP_INSTALLATION_ID=${process.env.GITHUB_APP_INSTALLATION_ID}`);
+    const keyPath = process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+    if (keyPath) {
+      args.push('-e', `GITHUB_APP_PRIVATE_KEY_PATH=/opt/github-app.pem`);
+      args.push('-v', `${keyPath}:/opt/github-app.pem:ro`);
+    }
+    const projectRoot = process.cwd();
+    args.push('-v', `${path.join(projectRoot, 'git-credential-github-app.sh')}:/opt/git-credential-github-app.sh:ro`);
+    args.push('-v', `${path.join(projectRoot, 'container-gitconfig')}:/tmp/container-gitconfig:ro`);
+    args.push('-e', 'GIT_CONFIG_GLOBAL=/tmp/container-gitconfig');
+  }
+
+  // Fallback: inject Anthropic API key directly when OneCLI is unavailable
   if (process.env.ANTHROPIC_API_KEY) {
-    args.push("-e", `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY}`);
+    args.push('-e', `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY}`);
   }
 
   // OneCLI gateway handles credential injection — containers never see real secrets.
