@@ -1,13 +1,13 @@
-import crypto from "crypto";
-import http from "http";
-import { WebClient } from "@slack/web-api";
-import { readEnvFile } from "../env.js";
-import { registerChannel, type ChannelOpts } from "./registry.js";
-import type { Channel, NewMessage } from "../types.js";
-import { logger } from "../logger.js";
+import crypto from 'crypto';
+import http from 'http';
+import { WebClient } from '@slack/web-api';
+import { readEnvFile } from '../env.js';
+import { registerChannel, type ChannelOpts } from './registry.js';
+import type { Channel, NewMessage } from '../types.js';
+import { logger } from '../logger.js';
 
-const SLACK_PREFIX = "slack:";
-const PORT = parseInt(process.env.SLACK_PORT || "3100", 10);
+const SLACK_PREFIX = 'slack:';
+const PORT = parseInt(process.env.SLACK_PORT || '3100', 10);
 
 function verifySlackSignature(
   signingSecret: string,
@@ -21,9 +21,9 @@ function verifySlackSignature(
   }
   const basestring = `v0:${timestamp}:${body}`;
   const hmac = crypto
-    .createHmac("sha256", signingSecret)
+    .createHmac('sha256', signingSecret)
     .update(basestring)
-    .digest("hex");
+    .digest('hex');
   return crypto.timingSafeEqual(
     Buffer.from(`v0=${hmac}`),
     Buffer.from(signature),
@@ -31,15 +31,16 @@ function verifySlackSignature(
 }
 
 class SlackChannel implements Channel {
-  name = "slack";
+  name = 'slack';
   private client: WebClient;
   private signingSecret: string;
-  private botUserId = "";
+  private botUserId = '';
   private server: http.Server | null = null;
   private opts: ChannelOpts;
   private connected = false;
   // Track the latest message ts per channel for reaction management
   private pendingReactions = new Map<string, string>(); // jid -> message ts
+  private pendingThreads = new Map<string, string>(); // jid -> thread_ts to reply in
 
   constructor(token: string, signingSecret: string, opts: ChannelOpts) {
     this.client = new WebClient(token);
@@ -50,36 +51,36 @@ class SlackChannel implements Channel {
   async connect(): Promise<void> {
     const auth = await this.client.auth.test();
     this.botUserId = auth.user_id as string;
-    logger.info({ botUserId: this.botUserId }, "Slack bot authenticated");
+    logger.info({ botUserId: this.botUserId }, 'Slack bot authenticated');
 
     this.server = http.createServer((req, res) => {
-      if (req.method !== "POST" || req.url !== "/slack/events") {
+      if (req.method !== 'POST' || req.url !== '/slack/events') {
         res.writeHead(404);
         res.end();
         return;
       }
 
-      let body = "";
-      req.on("data", (chunk) => (body += chunk));
-      req.on("end", () => {
-        const timestamp = req.headers["x-slack-request-timestamp"] as string;
-        const signature = req.headers["x-slack-signature"] as string;
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', () => {
+        const timestamp = req.headers['x-slack-request-timestamp'] as string;
+        const signature = req.headers['x-slack-signature'] as string;
 
         if (
           !timestamp ||
           !signature ||
           !verifySlackSignature(this.signingSecret, timestamp, body, signature)
         ) {
-          logger.warn("Slack signature verification failed");
+          logger.warn('Slack signature verification failed');
           res.writeHead(401);
-          res.end("Unauthorized");
+          res.end('Unauthorized');
           return;
         }
 
         const payload = JSON.parse(body);
 
-        if (payload.type === "url_verification") {
-          res.writeHead(200, { "Content-Type": "text/plain" });
+        if (payload.type === 'url_verification') {
+          res.writeHead(200, { 'Content-Type': 'text/plain' });
           res.end(payload.challenge);
           return;
         }
@@ -87,9 +88,9 @@ class SlackChannel implements Channel {
         res.writeHead(200);
         res.end();
 
-        if (payload.type === "event_callback") {
+        if (payload.type === 'event_callback') {
           this.handleEvent(payload.event).catch((err) =>
-            logger.error({ err }, "Error handling Slack event"),
+            logger.error({ err }, 'Error handling Slack event'),
           );
         }
       });
@@ -97,12 +98,12 @@ class SlackChannel implements Channel {
 
     this.server.listen(PORT, () => {
       this.connected = true;
-      logger.info({ port: PORT }, "Slack webhook server listening");
+      logger.info({ port: PORT }, 'Slack webhook server listening');
     });
   }
 
   private async handleEvent(event: any): Promise<void> {
-    if (event.type !== "message") return;
+    if (event.type !== 'message') return;
     if (event.subtype) return;
     if (event.bot_id) return;
     if (event.user === this.botUserId) return;
@@ -115,11 +116,14 @@ class SlackChannel implements Channel {
       await this.client.reactions.add({
         channel: event.channel,
         timestamp: event.ts,
-        name: "eyes",
+        name: 'eyes',
       });
       this.pendingReactions.set(chatJid, event.ts);
+      if (event.thread_ts) {
+        this.pendingThreads.set(chatJid, event.thread_ts);
+      }
     } catch (err) {
-      logger.warn({ err }, "Failed to add eyes reaction");
+      logger.warn({ err }, 'Failed to add eyes reaction');
     }
 
     let senderName = event.user;
@@ -136,17 +140,18 @@ class SlackChannel implements Channel {
       });
       channelName = info.channel?.name || event.channel;
     } catch {}
-    this.opts.onChatMetadata(chatJid, timestamp, channelName, "slack", true);
+    this.opts.onChatMetadata(chatJid, timestamp, channelName, 'slack', true);
 
     const msg: NewMessage = {
       id: event.ts,
       chat_jid: chatJid,
       sender: event.user,
       sender_name: senderName,
-      content: event.text || "",
+      content: event.text || '',
       timestamp,
       is_from_me: false,
       is_bot_message: false,
+      thread_id: event.thread_ts || undefined,
     };
 
     this.opts.onMessage(chatJid, msg);
@@ -155,15 +160,15 @@ class SlackChannel implements Channel {
   private async removeEyesReaction(jid: string): Promise<void> {
     const messageTs = this.pendingReactions.get(jid);
     if (!messageTs) return;
-    const channelId = jid.replace(SLACK_PREFIX, "");
+    const channelId = jid.replace(SLACK_PREFIX, '');
     try {
       await this.client.reactions.remove({
         channel: channelId,
         timestamp: messageTs,
-        name: "eyes",
+        name: 'eyes',
       });
     } catch (err) {
-      logger.debug({ err }, "Failed to remove eyes reaction");
+      logger.debug({ err }, 'Failed to remove eyes reaction');
     }
     this.pendingReactions.delete(jid);
   }
@@ -172,12 +177,12 @@ class SlackChannel implements Channel {
     // Remove eyes reaction on first response
     await this.removeEyesReaction(jid);
 
-    const channelId = jid.replace(SLACK_PREFIX, "");
+    const channelId = jid.replace(SLACK_PREFIX, '');
     const maxLen = 3900;
     const parts =
       text.length <= maxLen
         ? [text]
-        : text.match(new RegExp(`[\\s\\S]{1,${maxLen}}`, "g")) || [text];
+        : text.match(new RegExp(`[\\s\\S]{1,${maxLen}}`, 'g')) || [text];
 
     for (const part of parts) {
       await this.client.chat.postMessage({
@@ -210,8 +215,8 @@ class SlackChannel implements Channel {
   }
 }
 
-registerChannel("slack", (opts: ChannelOpts) => {
-  const env = readEnvFile(["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET"]);
+registerChannel('slack', (opts: ChannelOpts) => {
+  const env = readEnvFile(['SLACK_BOT_TOKEN', 'SLACK_SIGNING_SECRET']);
   const token = process.env.SLACK_BOT_TOKEN || env.SLACK_BOT_TOKEN;
   const signingSecret =
     process.env.SLACK_SIGNING_SECRET || env.SLACK_SIGNING_SECRET;

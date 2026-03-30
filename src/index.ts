@@ -341,7 +341,12 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = sessions[group.folder];
+  // Use thread-based sessions: thread replies resume, top-level messages start fresh
+  const lastMessage = getMessagesSince(chatJid, '', ASSISTANT_NAME, 1).pop();
+  const threadKey = lastMessage?.thread_id
+    ? `${group.folder}:${lastMessage.thread_id}`
+    : undefined;
+  const sessionId = threadKey ? sessions[threadKey] : undefined;
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -372,9 +377,10 @@ async function runAgent(
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
-        if (output.newSessionId && output.status !== 'error') {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
+        if (output.newSessionId) {
+          const saveKey = threadKey || group.folder;
+          sessions[saveKey] = output.newSessionId;
+          setSession(saveKey, output.newSessionId);
         }
         await onOutput(output);
       }
@@ -396,9 +402,10 @@ async function runAgent(
       wrappedOnOutput,
     );
 
-    if (output.newSessionId && output.status !== 'error') {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
+    if (output.newSessionId) {
+      const saveKey = threadKey || group.folder;
+      sessions[saveKey] = output.newSessionId;
+      setSession(saveKey, output.newSessionId);
     }
 
     if (output.status === 'error') {
