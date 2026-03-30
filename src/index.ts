@@ -515,34 +515,34 @@ async function startMessageLoop(): Promise<void> {
             if (!hasTrigger) continue;
           }
 
-          // Pull all messages since lastAgentTimestamp so non-trigger
-          // context that accumulated between triggers is included.
-          const allPending = getMessagesSince(
-            chatJid,
-            getOrRecoverCursor(chatJid),
-            ASSISTANT_NAME,
-            MAX_MESSAGES_PER_PROMPT,
-          );
-          const messagesToSend =
-            allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend, TIMEZONE);
+          // Only pipe thread replies into active containers — they belong
+          // to the ongoing conversation/session. Top-level messages need
+          // their own session, so always queue them for processGroupMessages.
+          const threadReplies = groupMessages.filter((m) => m.thread_id);
+          const hasTopLevel = groupMessages.some((m) => !m.thread_id);
 
-          if (queue.sendMessage(chatJid, formatted)) {
-            logger.debug(
-              { chatJid, count: messagesToSend.length },
-              'Piped messages to active container',
-            );
-            lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
-            saveState();
-            // Show typing indicator while the container processes the piped message
-            channel
-              .setTyping?.(chatJid, true)
-              ?.catch((err) =>
-                logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
+          if (threadReplies.length > 0) {
+            const formatted = formatMessages(threadReplies, TIMEZONE);
+            if (queue.sendMessage(chatJid, formatted)) {
+              logger.debug(
+                { chatJid, count: threadReplies.length },
+                'Piped thread replies to active container',
               );
-          } else {
-            // No active container — enqueue for a new one
+              lastAgentTimestamp[chatJid] =
+                threadReplies[threadReplies.length - 1].timestamp;
+              saveState();
+              channel
+                .setTyping?.(chatJid, true)
+                ?.catch((err) =>
+                  logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
+                );
+            } else {
+              queue.enqueueMessageCheck(chatJid);
+            }
+          }
+
+          if (hasTopLevel) {
+            // Top-level messages always get their own session
             queue.enqueueMessageCheck(chatJid);
           }
         }
