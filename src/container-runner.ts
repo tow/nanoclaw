@@ -251,6 +251,15 @@ async function buildContainerArgs(
 ): Promise<string[]> {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
+  // Use restricted network if available (egress filtered to allowed hosts only)
+  const restrictedNetwork = 'nanoclaw-restricted';
+  try {
+    require('child_process').execSync(`docker network inspect ${restrictedNetwork}`, { stdio: 'ignore' });
+    args.push('--network', restrictedNetwork);
+  } catch {
+    // Network not set up — fall back to default (unrestricted)
+  }
+
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
