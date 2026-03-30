@@ -119,9 +119,9 @@ class SlackChannel implements Channel {
         name: 'eyes',
       });
       this.pendingReactions.set(chatJid, event.ts);
-      if (event.thread_ts) {
-        this.pendingThreads.set(chatJid, event.thread_ts);
-      }
+      // Always reply in a thread: use existing thread_ts, or start a new
+      // thread from the user's message ts
+      this.pendingThreads.set(chatJid, event.thread_ts || event.ts);
     } catch (err) {
       logger.warn({ err }, 'Failed to add eyes reaction');
     }
