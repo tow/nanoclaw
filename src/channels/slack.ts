@@ -178,6 +178,9 @@ class SlackChannel implements Channel {
     await this.removeEyesReaction(jid);
 
     const channelId = jid.replace(SLACK_PREFIX, '');
+    const threadTs = this.pendingThreads.get(jid);
+    this.pendingThreads.delete(jid);
+
     const maxLen = 3900;
     const parts =
       text.length <= maxLen
@@ -188,6 +191,7 @@ class SlackChannel implements Channel {
       await this.client.chat.postMessage({
         channel: channelId,
         text: part,
+        thread_ts: threadTs,
         unfurl_links: false,
       });
     }
