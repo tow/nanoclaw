@@ -228,20 +228,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const isMainGroup = group.isMain === true;
 
-  const missedMessages = getMessagesSince(
+  const allPending = getMessagesSince(
     chatJid,
     getOrRecoverCursor(chatJid),
     ASSISTANT_NAME,
     MAX_MESSAGES_PER_PROMPT,
   );
 
-  if (missedMessages.length === 0) return true;
+  if (allPending.length === 0) return true;
 
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
     const triggerPattern = getTriggerPattern(group.trigger);
     const allowlistCfg = loadSenderAllowlist();
-    const hasTrigger = missedMessages.some(
+    const hasTrigger = allPending.some(
       (m) =>
         triggerPattern.test(m.content.trim()) &&
         (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
@@ -249,18 +249,34 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  // Split pending messages into conversation units.
+  // A conversation unit is either:
+  //   - A single top-level message (no thread_id) → independent conversation
+  //   - All messages sharing the same thread_id → continuation of one thread
+  // We process only the FIRST unit, then return so the queue calls us again
+  // for the remaining units. This ensures each top-level message gets its
+  // own session and thread replies stay grouped with their parent.
+  const firstMsg = allPending[0];
+  let unit: typeof allPending;
 
-  // Advance cursor so the piping path in startMessageLoop won't re-fetch
-  // these messages. Save the old cursor so we can roll back on error.
+  if (firstMsg.thread_id) {
+    // First message is a thread reply — grab all pending messages in this thread
+    unit = allPending.filter((m) => m.thread_id === firstMsg.thread_id);
+  } else {
+    // First message is top-level — process it alone
+    unit = [firstMsg];
+  }
+
+  const prompt = formatMessages(unit, TIMEZONE);
+
+  // Advance cursor past only the messages in this unit.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
-  lastAgentTimestamp[chatJid] =
-    missedMessages[missedMessages.length - 1].timestamp;
+  lastAgentTimestamp[chatJid] = unit[unit.length - 1].timestamp;
   saveState();
 
   logger.info(
-    { group: group.name, messageCount: missedMessages.length },
-    'Processing messages',
+    { group: group.name, messageCount: unit.length, pending: allPending.length },
+    'Processing conversation unit',
   );
 
   // Track idle timer for closing stdin when agent is idle
@@ -281,31 +297,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  // Extract thread context from the latest message for session keying.
-  // For top-level messages: threadId is undefined, messageId is the msg's own ts.
-  // For thread replies: threadId is the parent's ts.
-  // Session key uses threadId || messageId so that:
-  //   - Top-level saves under its own ts (which becomes thread_ts for replies)
-  //   - Thread replies look up under thread_ts (= parent's ts) → finds the session
-  const lastMsg = missedMessages[missedMessages.length - 1];
-  const threadId = lastMsg?.thread_id || undefined;
-  const messageId = lastMsg?.id || undefined;
+  // Session keying: threadId || messageId ensures parent and replies share a key.
+  const threadId = firstMsg.thread_id || undefined;
+  const messageId = firstMsg.id || undefined;
 
   const output = await runAgent(group, prompt, chatJid, threadId, messageId, async (result) => {
-    // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
         typeof result.result === 'string'
           ? result.result
           : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
     }
 
@@ -322,8 +329,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
-    // If we already sent output to the user, don't roll back the cursor —
-    // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
       logger.warn(
         { group: group.name },
@@ -331,7 +336,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       );
       return true;
     }
-    // Roll back cursor so retries can re-process these messages
     lastAgentTimestamp[chatJid] = previousCursor;
     saveState();
     logger.warn(
@@ -339,6 +343,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       'Agent error, rolled back message cursor for retry',
     );
     return false;
+  }
+
+  // If there are more pending messages beyond this unit, signal the queue
+  // to call us again immediately.
+  if (allPending.length > unit.length) {
+    queue.enqueueMessageCheck(chatJid);
   }
 
   return true;
