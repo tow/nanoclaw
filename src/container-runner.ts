@@ -89,19 +89,40 @@ function buildVolumeMounts(
       });
     }
 
-    // Main also gets its group folder as the working directory
-    mounts.push({
-      hostPath: groupDir,
-      containerPath: '/workspace/group',
-      readonly: false,
-    });
+    // Main gets its group folder as working directory,
+    // unless a custom projectPath is configured
+    const mainCustomProject = group.containerConfig?.projectPath;
+    if (mainCustomProject) {
+      const expandedMainPath = mainCustomProject.replace(/^~/, process.env.HOME || "/root");
+      mounts.push({
+        hostPath: expandedMainPath,
+        containerPath: '/workspace/group',
+        readonly: false,
+      });
+    } else {
+      mounts.push({
+        hostPath: groupDir,
+        containerPath: '/workspace/group',
+        readonly: false,
+      });
+    }
   } else {
-    // Other groups only get their own folder
-    mounts.push({
-      hostPath: groupDir,
-      containerPath: '/workspace/group',
-      readonly: false,
-    });
+    // If group has a custom projectPath, mount it as the working directory
+    const customProject = group.containerConfig?.projectPath;
+    if (customProject) {
+      const expandedPath = customProject.replace(/^~/, process.env.HOME || "/root");
+      mounts.push({
+        hostPath: expandedPath,
+        containerPath: "/workspace/group",
+        readonly: false,
+      });
+    } else {
+      mounts.push({
+        hostPath: groupDir,
+        containerPath: "/workspace/group",
+        readonly: false,
+      });
+    }
 
     // Global memory directory (read-only for non-main)
     // Only directory mounts are supported, not file mounts
@@ -232,6 +253,10 @@ async function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+  // Inject Anthropic API key directly (no OneCLI)
+  if (process.env.ANTHROPIC_API_KEY) {
+    args.push("-e", `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY}`);
+  }
 
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.

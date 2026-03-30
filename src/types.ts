@@ -28,6 +28,7 @@ export interface AllowedRoot {
 }
 
 export interface ContainerConfig {
+  projectPath?: string; // External repo to use as working directory (/workspace/group)
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
 }
