@@ -293,21 +293,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
-  // Tell the channel where to direct responses for this conversation unit.
-  // For top-level messages: threadTs = message's own ts (starts a new thread).
-  // For thread replies: threadTs = thread_ts (replies in existing thread).
-  const threadId = firstMsg.thread_id || undefined;
-  const messageId = firstMsg.id || undefined;
-  const replyThreadTs = threadId || messageId;
-  if (replyThreadTs && messageId) {
-    channel.setReplyContext?.(chatJid, { threadTs: replyThreadTs, messageTs: messageId });
+  // threadTs identifies the conversation: thread_id for replies, message id for top-level.
+  // Used for both reply routing and session keying.
+  const threadTs = firstMsg.thread_id || firstMsg.id;
+  if (threadTs) {
+    channel.setReplyContext?.(chatJid, { threadTs, messageTs: firstMsg.id });
   }
 
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, threadId, messageId, async (result) => {
+  const output = await runAgent(group, prompt, chatJid, threadTs, async (result) => {
     if (result.result) {
       const raw =
         typeof result.result === 'string'
@@ -364,18 +361,11 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
-  threadId?: string,
-  messageId?: string,
+  threadTs?: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  // Thread-aware session keying:
-  // - threadId (thread_ts) is set for thread replies, points to parent msg
-  // - messageId (ts) is the message's own id, becomes thread_ts for future replies
-  // Using threadId || messageId means both the parent and replies share the same key.
-  const sessionKey = (threadId || messageId)
-    ? `${group.folder}:${threadId || messageId}`
-    : group.folder;
+  const sessionKey = threadTs ? `${group.folder}:${threadTs}` : group.folder;
   const sessionId = sessions[sessionKey];
 
   // Update tasks snapshot for container to read (filtered by group)
