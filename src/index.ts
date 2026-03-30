@@ -293,13 +293,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
+  // Tell the channel where to direct responses for this conversation unit.
+  // For top-level messages: threadTs = message's own ts (starts a new thread).
+  // For thread replies: threadTs = thread_ts (replies in existing thread).
+  const threadId = firstMsg.thread_id || undefined;
+  const messageId = firstMsg.id || undefined;
+  const replyThreadTs = threadId || messageId;
+  if (replyThreadTs && messageId) {
+    channel.setReplyContext?.(chatJid, { threadTs: replyThreadTs, messageTs: messageId });
+  }
+
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
-
-  // Session keying: threadId || messageId ensures parent and replies share a key.
-  const threadId = firstMsg.thread_id || undefined;
-  const messageId = firstMsg.id || undefined;
 
   const output = await runAgent(group, prompt, chatJid, threadId, messageId, async (result) => {
     if (result.result) {

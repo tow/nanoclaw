@@ -119,9 +119,6 @@ class SlackChannel implements Channel {
         name: 'eyes',
       });
       this.pendingReactions.set(chatJid, event.ts);
-      // Always reply in a thread: use existing thread_ts, or start a new
-      // thread from the user's message ts
-      this.pendingThreads.set(chatJid, event.thread_ts || event.ts);
     } catch (err) {
       logger.warn({ err }, 'Failed to add eyes reaction');
     }
@@ -173,13 +170,18 @@ class SlackChannel implements Channel {
     this.pendingReactions.delete(jid);
   }
 
+  setReplyContext(jid: string, context: { threadTs: string; messageTs: string }): void {
+    this.pendingThreads.set(jid, context.threadTs);
+    // Update eyes reaction to point at the message being processed
+    this.pendingReactions.set(jid, context.messageTs);
+  }
+
   async sendMessage(jid: string, text: string): Promise<void> {
     // Remove eyes reaction on first response
     await this.removeEyesReaction(jid);
 
     const channelId = jid.replace(SLACK_PREFIX, '');
     const threadTs = this.pendingThreads.get(jid);
-    this.pendingThreads.delete(jid);
 
     const maxLen = 3900;
     const parts =

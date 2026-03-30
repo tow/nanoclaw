@@ -91,6 +91,10 @@ export interface Channel {
   disconnect(): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
+  // Optional: set the reply context for the next sendMessage call.
+  // The orchestrator calls this before processing each conversation unit
+  // so the channel knows where to direct responses (e.g. which Slack thread).
+  setReplyContext?(jid: string, context: { threadTs: string; messageTs: string }): void;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
 }
