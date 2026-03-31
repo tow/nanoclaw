@@ -73,7 +73,7 @@ interface SDKUserMessage {
 
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_POLL_MS = 500;
-const REPO_DIR = '/workspace/repo';
+const REPO_DIR = '/workspace/group';
 const THREADS_DIR = '/workspace/threads';
 const SESSION_IDLE_MS = 5 * 60 * 1000;   // 5 min per session
 const CONTAINER_IDLE_MS = 10 * 60 * 1000; // 10 min with zero sessions

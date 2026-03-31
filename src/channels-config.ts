@@ -30,18 +30,20 @@ export interface ChannelsConfig {
   channels: Record<string, ChannelConfig>;
 }
 
-const CONFIG_PATHS = [
-  process.env.NANOCLAW_CHANNELS_CONFIG,
-  path.join(os.homedir(), '.config', 'nanoclaw', 'channels.yaml'),
-  path.join(process.cwd(), 'channels.yaml'),
-];
+function getConfigPaths(): (string | undefined)[] {
+  return [
+    process.env.NANOCLAW_CHANNELS_CONFIG,
+    path.join(os.homedir(), '.config', 'nanoclaw', 'channels.yaml'),
+    path.join(process.cwd(), 'channels.yaml'),
+  ];
+}
 
 /**
  * Load and validate the channels config file.
  * Returns null if no config file is found.
  */
 export function loadChannelsConfig(): ChannelsConfig | null {
-  const configPath = CONFIG_PATHS.find((p) => p && fs.existsSync(p));
+  const configPath = getConfigPaths().find((p) => p && fs.existsSync(p));
   if (!configPath) {
     logger.info('No channels.yaml found, using dynamic registration only');
     return null;
@@ -54,12 +56,18 @@ export function loadChannelsConfig(): ChannelsConfig | null {
 
   // Validate
   if (!parsed.repos || typeof parsed.repos !== 'object') {
-    logger.error({ path: configPath }, 'channels.yaml: missing or invalid "repos" section');
+    logger.error(
+      { path: configPath },
+      'channels.yaml: missing or invalid "repos" section',
+    );
     return null;
   }
 
   if (!parsed.channels || typeof parsed.channels !== 'object') {
-    logger.error({ path: configPath }, 'channels.yaml: missing or invalid "channels" section');
+    logger.error(
+      { path: configPath },
+      'channels.yaml: missing or invalid "channels" section',
+    );
     return null;
   }
 
@@ -69,10 +77,16 @@ export function loadChannelsConfig(): ChannelsConfig | null {
       return null;
     }
     if (!fs.existsSync(repo.path)) {
-      logger.warn({ repo: name, path: repo.path }, 'channels.yaml: repo path does not exist');
+      logger.warn(
+        { repo: name, path: repo.path },
+        'channels.yaml: repo path does not exist',
+      );
     }
     if (!repo.allowedTools || !Array.isArray(repo.allowedTools)) {
-      logger.warn({ repo: name }, 'channels.yaml: repo has no allowedTools, will use restrictive defaults');
+      logger.warn(
+        { repo: name },
+        'channels.yaml: repo has no allowedTools, will use restrictive defaults',
+      );
       repo.allowedTools = [];
     }
   }
@@ -96,7 +110,10 @@ export function loadChannelsConfig(): ChannelsConfig | null {
   }
 
   logger.info(
-    { repos: Object.keys(parsed.repos).length, channels: Object.keys(parsed.channels).length },
+    {
+      repos: Object.keys(parsed.repos).length,
+      channels: Object.keys(parsed.channels).length,
+    },
     'Channels config loaded',
   );
 

@@ -6,11 +6,14 @@ import {
   deleteTask,
   getAllChats,
   getAllRegisteredGroups,
+  getAllSessions,
   getLastBotMessageTimestamp,
   getMessagesSince,
   getNewMessages,
+  getSession,
   getTaskById,
   setRegisteredGroup,
+  setSession,
   storeChatMetadata,
   storeMessage,
   updateTask,
@@ -568,5 +571,53 @@ describe('registered group isMain', () => {
     const group = groups['group@g.us'];
     expect(group).toBeDefined();
     expect(group.isMain).toBeUndefined();
+  });
+});
+
+// --- Sessions with composite key (group_folder, thread_ts) ---
+
+describe('sessions with thread_ts', () => {
+  it('stores and retrieves a session with default thread_ts', () => {
+    setSession('my-group', 'session-abc');
+    expect(getSession('my-group')).toBe('session-abc');
+  });
+
+  it('stores and retrieves sessions per thread', () => {
+    setSession('my-group', 'session-1', 'thread-111');
+    setSession('my-group', 'session-2', 'thread-222');
+
+    expect(getSession('my-group', 'thread-111')).toBe('session-1');
+    expect(getSession('my-group', 'thread-222')).toBe('session-2');
+    // Default thread should not exist
+    expect(getSession('my-group')).toBeUndefined();
+  });
+
+  it('updates session for a specific thread without affecting others', () => {
+    setSession('my-group', 'session-old', 'thread-111');
+    setSession('my-group', 'session-other', 'thread-222');
+
+    setSession('my-group', 'session-new', 'thread-111');
+
+    expect(getSession('my-group', 'thread-111')).toBe('session-new');
+    expect(getSession('my-group', 'thread-222')).toBe('session-other');
+  });
+
+  it('getAllSessions returns composite keys for thread sessions', () => {
+    setSession('group-a', 'session-1', 'thread-111');
+    setSession('group-a', 'session-2', 'thread-222');
+    setSession('group-b', 'session-3');
+
+    const all = getAllSessions();
+    expect(all['group-a:thread-111']).toBe('session-1');
+    expect(all['group-a:thread-222']).toBe('session-2');
+    expect(all['group-b']).toBe('session-3');
+  });
+
+  it('different groups can have threads with the same thread_ts', () => {
+    setSession('group-a', 'session-a', 'thread-111');
+    setSession('group-b', 'session-b', 'thread-111');
+
+    expect(getSession('group-a', 'thread-111')).toBe('session-a');
+    expect(getSession('group-b', 'thread-111')).toBe('session-b');
   });
 });

@@ -34,9 +34,25 @@ Text inside `<internal>` tags is logged but not sent to the user. If you've alre
 
 When working as a sub-agent or teammate, only use `send_message` if instructed to by the main agent.
 
+## Git Workflow
+
+You may be working in a git worktree (a branch off main). The standard workflow for committing changes:
+
+```bash
+python3 scripts/validate.py .        # Always validate first
+git add <files>
+git commit -m "descriptive message"
+git pull --rebase origin main        # Sync with main
+git push origin HEAD:main            # Push your branch to main
+```
+
+Always use `git push origin HEAD:main` — never bare `git push`. This ensures your changes land on the main branch regardless of which worktree branch you're on.
+
+If the push fails because the remote moved, run `git pull --rebase origin main` and retry.
+
 ## Your Workspace
 
-Files you create are saved in `/workspace/group/`. Use this for notes, research, or anything that should persist.
+Files you create are saved in your working directory. Use this for notes, research, or anything that should persist.
 
 ## Memory
 
