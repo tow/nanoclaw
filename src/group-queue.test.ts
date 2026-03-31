@@ -388,7 +388,7 @@ describe('GroupQueue', () => {
     queue.notifyIdle('group1@g.us');
 
     // A new user message arrives — resets idleWaiting
-    queue.sendMessage('group1@g.us', 'hello');
+    queue.sendMessage('group1@g.us', 'thread1', 'hello');
 
     // Task enqueued after message reset — should NOT preempt (agent is working)
     const writeFileSync = vi.mocked(fs.default.writeFileSync);
@@ -426,7 +426,7 @@ describe('GroupQueue', () => {
     );
 
     // sendMessage should return false — user messages must not go to task containers
-    const result = queue.sendMessage('group1@g.us', 'hello');
+    const result = queue.sendMessage('group1@g.us', 'thread1', 'hello');
     expect(result).toBe(false);
 
     resolveTask!();

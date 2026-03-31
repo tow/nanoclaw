@@ -70,8 +70,10 @@ function createSchema(database: Database.Database): void {
       value TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS sessions (
-      group_folder TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL
+      group_folder TEXT NOT NULL,
+      thread_ts TEXT NOT NULL DEFAULT '_default',
+      session_id TEXT NOT NULL,
+      PRIMARY KEY (group_folder, thread_ts)
     );
     CREATE TABLE IF NOT EXISTS registered_groups (
       jid TEXT PRIMARY KEY,
@@ -133,6 +135,32 @@ function createSchema(database: Database.Database): void {
     );
   } catch {
     /* column already exists */
+  }
+
+  // Migrate sessions table from single-key (group_folder) to composite key (group_folder, thread_ts)
+  try {
+    const hasThreadTs = database
+      .prepare(`PRAGMA table_info(sessions)`)
+      .all()
+      .some((col: any) => col.name === 'thread_ts');
+    if (!hasThreadTs) {
+      database.exec(`ALTER TABLE sessions RENAME TO sessions_old`);
+      database.exec(`
+        CREATE TABLE sessions (
+          group_folder TEXT NOT NULL,
+          thread_ts TEXT NOT NULL DEFAULT '_default',
+          session_id TEXT NOT NULL,
+          PRIMARY KEY (group_folder, thread_ts)
+        )
+      `);
+      database.exec(`
+        INSERT INTO sessions (group_folder, thread_ts, session_id)
+        SELECT group_folder, '_default', session_id FROM sessions_old
+      `);
+      database.exec(`DROP TABLE sessions_old`);
+    }
+  } catch {
+    /* migration already done or table doesn't exist yet */
   }
 
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
@@ -558,26 +586,28 @@ export function setRouterState(key: string, value: string): void {
 
 // --- Session accessors ---
 
-export function getSession(groupFolder: string): string | undefined {
+export function getSession(groupFolder: string, threadTs: string = '_default'): string | undefined {
   const row = db
-    .prepare('SELECT session_id FROM sessions WHERE group_folder = ?')
-    .get(groupFolder) as { session_id: string } | undefined;
+    .prepare('SELECT session_id FROM sessions WHERE group_folder = ? AND thread_ts = ?')
+    .get(groupFolder, threadTs) as { session_id: string } | undefined;
   return row?.session_id;
 }
 
-export function setSession(groupFolder: string, sessionId: string): void {
+export function setSession(groupFolder: string, sessionId: string, threadTs: string = '_default'): void {
   db.prepare(
-    'INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)',
-  ).run(groupFolder, sessionId);
+    'INSERT OR REPLACE INTO sessions (group_folder, thread_ts, session_id) VALUES (?, ?, ?)',
+  ).run(groupFolder, threadTs, sessionId);
 }
 
 export function getAllSessions(): Record<string, string> {
   const rows = db
-    .prepare('SELECT group_folder, session_id FROM sessions')
-    .all() as Array<{ group_folder: string; session_id: string }>;
+    .prepare('SELECT group_folder, thread_ts, session_id FROM sessions')
+    .all() as Array<{ group_folder: string; thread_ts: string; session_id: string }>;
   const result: Record<string, string> = {};
   for (const row of rows) {
-    result[row.group_folder] = row.session_id;
+    // Key format: "folder:threadTs" for thread sessions, just "folder" for default
+    const key = row.thread_ts === '_default' ? row.group_folder : `${row.group_folder}:${row.thread_ts}`;
+    result[key] = row.session_id;
   }
   return result;
 }

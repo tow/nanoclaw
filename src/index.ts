@@ -20,8 +20,11 @@ import {
   getRegisteredChannelNames,
 } from './channels/registry.js';
 import {
+  ContainerHandle,
+  ContainerMessage,
   ContainerOutput,
   runContainerAgent,
+  startContainerAgent,
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
@@ -75,6 +78,11 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+
+/** Long-lived container handles, keyed by chatJid. */
+const containerHandles = new Map<string, ContainerHandle>();
+/** Track which threads have active sessions per channel. */
+const activeThreads = new Map<string, Set<string>>();
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 
@@ -216,6 +224,11 @@ export function _setRegisteredGroups(
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
  */
+/**
+ * Process all pending messages for a group.
+ * Groups messages into conversation units (per thread) and dispatches them
+ * to the long-lived container. Starts the container if not already running.
+ */
 async function processGroupMessages(chatJid: string): Promise<boolean> {
   const group = registeredGroups[chatJid];
   if (!group) return true;
@@ -249,126 +262,76 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  // Split pending messages into conversation units.
-  // A conversation unit is either:
-  //   - A single top-level message (no thread_id) → independent conversation
-  //   - All messages sharing the same thread_id → continuation of one thread
-  // We process only the FIRST unit, then return so the queue calls us again
-  // for the remaining units. This ensures each top-level message gets its
-  // own session and thread replies stay grouped with their parent.
-  const firstMsg = allPending[0];
-  let unit: typeof allPending;
-
-  if (firstMsg.thread_id) {
-    // First message is a thread reply — grab all pending messages in this thread
-    unit = allPending.filter((m) => m.thread_id === firstMsg.thread_id);
-  } else {
-    // First message is top-level — process it alone
-    unit = [firstMsg];
+  // Group pending messages into conversation units by thread.
+  const units = new Map<string, typeof allPending>();
+  for (const msg of allPending) {
+    const threadTs = msg.thread_id || msg.id;
+    if (!units.has(threadTs)) units.set(threadTs, []);
+    units.get(threadTs)!.push(msg);
   }
 
-  const prompt = formatMessages(unit, TIMEZONE);
-
-  // Advance cursor past only the messages in this unit.
-  const previousCursor = lastAgentTimestamp[chatJid] || '';
-  lastAgentTimestamp[chatJid] = unit[unit.length - 1].timestamp;
+  // Advance cursor past all dispatched messages.
+  lastAgentTimestamp[chatJid] = allPending[allPending.length - 1].timestamp;
   saveState();
 
   logger.info(
-    { group: group.name, messageCount: unit.length, pending: allPending.length },
-    'Processing conversation unit',
+    { group: group.name, messageCount: allPending.length, threads: units.size },
+    'Processing conversation units',
   );
 
-  // Track idle timer for closing stdin when agent is idle
-  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  // Ensure a container is running for this channel.
+  let handle = containerHandles.get(chatJid);
+  if (!handle) {
+    // Start long-lived container with the first thread.
+    const [firstThreadTs, firstUnit] = [...units.entries()][0];
+    const prompt = formatMessages(firstUnit, TIMEZONE);
+    const sessionKey = `${group.folder}:${firstThreadTs}`;
+    const sessionId = sessions[sessionKey];
 
-  const resetIdleTimer = () => {
-    if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
-      logger.debug(
-        { group: group.name },
-        'Idle timeout, closing container stdin',
-      );
-      queue.closeStdin(chatJid);
-    }, IDLE_TIMEOUT);
-  };
+    channel.setReplyContext?.(chatJid, { threadTs: firstThreadTs, messageTs: firstUnit[0].id });
 
-  // threadTs identifies the conversation: thread_id for replies, message id for top-level.
-  // Used for both reply routing and session keying.
-  const threadTs = firstMsg.thread_id || firstMsg.id;
-  if (threadTs) {
-    channel.setReplyContext?.(chatJid, { threadTs, messageTs: firstMsg.id });
+    handle = await startContainerForGroup(chatJid, group, firstThreadTs, prompt, sessionId);
+    units.delete(firstThreadTs); // Already sent as initial thread
   }
 
-  await channel.setTyping?.(chatJid, true);
-  let hadError = false;
-  let outputSentToUser = false;
+  // Dispatch remaining units via IPC.
+  const threads = activeThreads.get(chatJid) || new Set<string>();
+  for (const [threadTs, msgs] of units) {
+    const prompt = formatMessages(msgs, TIMEZONE);
 
-  const output = await runAgent(group, prompt, chatJid, threadTs, async (result) => {
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
-      }
-      resetIdleTimer();
+    channel.setReplyContext?.(chatJid, { threadTs, messageTs: msgs[0].id });
+
+    if (threads.has(threadTs)) {
+      // Thread already has an active session — send as follow-up
+      handle.sendIPC({ type: 'message', threadTs, text: prompt });
+      logger.debug({ chatJid, threadTs }, 'Sent follow-up to active thread');
+    } else {
+      // New thread — start a new session
+      const sessionKey = `${group.folder}:${threadTs}`;
+      const sessionId = sessions[sessionKey];
+      handle.sendIPC({ type: 'new_thread', threadTs, text: prompt, sessionId });
+      threads.add(threadTs);
+      logger.debug({ chatJid, threadTs }, 'Started new thread session');
     }
-
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
-
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  });
-
-  await channel.setTyping?.(chatJid, false);
-  if (idleTimer) clearTimeout(idleTimer);
-
-  if (output === 'error' || hadError) {
-    if (outputSentToUser) {
-      logger.warn(
-        { group: group.name },
-        'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
-      );
-      return true;
-    }
-    lastAgentTimestamp[chatJid] = previousCursor;
-    saveState();
-    logger.warn(
-      { group: group.name },
-      'Agent error, rolled back message cursor for retry',
-    );
-    return false;
   }
-
-  // If there are more pending messages beyond this unit, signal the queue
-  // to call us again immediately.
-  if (allPending.length > unit.length) {
-    queue.enqueueMessageCheck(chatJid);
-  }
+  activeThreads.set(chatJid, threads);
 
   return true;
 }
 
-async function runAgent(
-  group: RegisteredGroup,
-  prompt: string,
+/**
+ * Start a long-lived container for a channel and wire up output routing.
+ */
+async function startContainerForGroup(
   chatJid: string,
-  threadTs?: string,
-  onOutput?: (output: ContainerOutput) => Promise<void>,
-): Promise<'success' | 'error'> {
+  group: RegisteredGroup,
+  initialThreadTs: string,
+  initialPrompt: string,
+  initialSessionId?: string,
+): Promise<ContainerHandle> {
   const isMain = group.isMain === true;
-  const sessionKey = threadTs ? `${group.folder}:${threadTs}` : group.folder;
-  const sessionId = sessions[sessionKey];
 
-  // Update tasks snapshot for container to read (filtered by group)
+  // Update snapshots for container to read
   const tasks = getAllTasks();
   writeTasksSnapshot(
     group.folder,
@@ -384,22 +347,131 @@ async function runAgent(
       next_run: t.next_run,
     })),
   );
-
-  // Update available groups snapshot (main group only can see all groups)
-  const availableGroups = getAvailableGroups();
   writeGroupsSnapshot(
     group.folder,
     isMain,
-    availableGroups,
+    getAvailableGroups(),
     new Set(Object.keys(registeredGroups)),
   );
 
-  // Wrap onOutput to track session ID from streamed results
+  const handle = await startContainerAgent(
+    group,
+    {
+      groupFolder: group.folder,
+      chatJid,
+      isMain,
+      assistantName: ASSISTANT_NAME,
+      prompt: initialPrompt,
+      sessionId: initialSessionId,
+      threadTs: initialThreadTs,
+    },
+    (proc, containerName) =>
+      queue.registerProcess(chatJid, proc, containerName, group.folder),
+  );
+
+  containerHandles.set(chatJid, handle);
+  const threads = new Set<string>([initialThreadTs]);
+  activeThreads.set(chatJid, threads);
+
+  const channel = findChannel(channels, chatJid);
+
+  // Route output from container to correct Slack threads.
+  handle.onOutput(async (msg) => {
+    if (msg.type === 'lifecycle') {
+      // Lifecycle events: ready, session_ended
+      if (msg.event === 'session_ended' && msg.threadTs) {
+        if (msg.newSessionId) {
+          const sessionKey = `${group.folder}:${msg.threadTs}`;
+          sessions[sessionKey] = msg.newSessionId;
+          setSession(group.folder, msg.newSessionId, msg.threadTs);
+        }
+        threads.delete(msg.threadTs);
+        logger.debug({ chatJid, threadTs: msg.threadTs }, 'Session ended');
+      }
+      return;
+    }
+
+    // Result messages
+    const threadTs = msg.threadTs;
+
+    if (msg.newSessionId && threadTs) {
+      const sessionKey = `${group.folder}:${threadTs}`;
+      sessions[sessionKey] = msg.newSessionId;
+      setSession(group.folder, msg.newSessionId, threadTs);
+    }
+
+    if (msg.result && threadTs && channel) {
+      const raw = typeof msg.result === 'string'
+        ? msg.result
+        : JSON.stringify(msg.result);
+      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+      if (text) {
+        await channel.sendMessage(chatJid, text, threadTs);
+      }
+    }
+  });
+
+  // Handle container exit — clean up and allow restart on next message.
+  handle.onExit((code) => {
+    logger.info(
+      { chatJid, group: group.name, code, threads: threads.size },
+      'Container exited',
+    );
+    containerHandles.delete(chatJid);
+    activeThreads.delete(chatJid);
+  });
+
+  logger.info(
+    { chatJid, group: group.name, initialThreadTs },
+    'Started long-lived container',
+  );
+
+  return handle;
+}
+
+/**
+ * Run a single-shot agent (used by scheduled tasks).
+ * For interactive messages, use startContainerForGroup() instead.
+ */
+async function runAgent(
+  group: RegisteredGroup,
+  prompt: string,
+  chatJid: string,
+  threadTs?: string,
+  onOutput?: (output: ContainerOutput) => Promise<void>,
+): Promise<'success' | 'error'> {
+  const isMain = group.isMain === true;
+  const sessionKey = threadTs ? `${group.folder}:${threadTs}` : group.folder;
+  const sessionId = sessions[sessionKey];
+
+  const tasks = getAllTasks();
+  writeTasksSnapshot(
+    group.folder,
+    isMain,
+    tasks.map((t) => ({
+      id: t.id,
+      groupFolder: t.group_folder,
+      prompt: t.prompt,
+      script: t.script || undefined,
+      schedule_type: t.schedule_type,
+      schedule_value: t.schedule_value,
+      status: t.status,
+      next_run: t.next_run,
+    })),
+  );
+  writeGroupsSnapshot(
+    group.folder,
+    isMain,
+    getAvailableGroups(),
+    new Set(Object.keys(registeredGroups)),
+  );
+
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
-          sessions[sessionKey] = output.newSessionId;
-          setSession(sessionKey, output.newSessionId);
+          const tTs = output.threadTs || threadTs || '_default';
+          sessions[`${group.folder}:${tTs}`] = output.newSessionId;
+          setSession(group.folder, output.newSessionId, tTs);
         }
         await onOutput(output);
       }
@@ -415,6 +487,7 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        isScheduledTask: true,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -422,8 +495,9 @@ async function runAgent(
     );
 
     if (output.newSessionId) {
-      sessions[sessionKey] = output.newSessionId;
-      setSession(sessionKey, output.newSessionId);
+      const tTs = output.threadTs || threadTs || '_default';
+      sessions[`${group.folder}:${tTs}`] = output.newSessionId;
+      setSession(group.folder, output.newSessionId, tTs);
     }
 
     if (output.status === 'error') {
@@ -505,34 +579,30 @@ async function startMessageLoop(): Promise<void> {
             if (!hasTrigger) continue;
           }
 
-          // Only pipe thread replies into active containers — they belong
-          // to the ongoing conversation/session. Top-level messages need
-          // their own session, so always queue them for processGroupMessages.
-          const threadReplies = groupMessages.filter((m) => m.thread_id);
-          const hasTopLevel = groupMessages.some((m) => !m.thread_id);
+          // Route all messages (thread replies and top-level) to the container.
+          // If a container is running, dispatch directly via IPC.
+          // Otherwise, enqueue for processGroupMessages to start one.
+          const handle = containerHandles.get(chatJid);
+          if (handle) {
+            const threads = activeThreads.get(chatJid) || new Set<string>();
+            for (const msg of groupMessages) {
+              const threadTs = msg.thread_id || msg.id;
+              const formatted = formatMessages([msg], TIMEZONE);
 
-          if (threadReplies.length > 0) {
-            const formatted = formatMessages(threadReplies, TIMEZONE);
-            if (queue.sendMessage(chatJid, formatted)) {
-              logger.debug(
-                { chatJid, count: threadReplies.length },
-                'Piped thread replies to active container',
-              );
-              lastAgentTimestamp[chatJid] =
-                threadReplies[threadReplies.length - 1].timestamp;
-              saveState();
-              channel
-                .setTyping?.(chatJid, true)
-                ?.catch((err) =>
-                  logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
-                );
-            } else {
-              queue.enqueueMessageCheck(chatJid);
+              channel.setReplyContext?.(chatJid, { threadTs, messageTs: msg.id });
+
+              if (threads.has(threadTs)) {
+                handle.sendIPC({ type: 'message', threadTs, text: formatted });
+              } else {
+                const sessionKey = `${group.folder}:${threadTs}`;
+                handle.sendIPC({ type: 'new_thread', threadTs, text: formatted, sessionId: sessions[sessionKey] });
+                threads.add(threadTs);
+              }
             }
-          }
-
-          if (hasTopLevel) {
-            // Top-level messages always get their own session
+            activeThreads.set(chatJid, threads);
+            lastAgentTimestamp[chatJid] = groupMessages[groupMessages.length - 1].timestamp;
+            saveState();
+          } else {
             queue.enqueueMessageCheck(chatJid);
           }
         }

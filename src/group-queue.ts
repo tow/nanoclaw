@@ -154,31 +154,44 @@ export class GroupQueue {
   }
 
   /**
-   * Send a follow-up message to the active container via IPC file.
+   * Send a follow-up message to an existing thread in the active container.
    * Returns true if the message was written, false if no active container.
    */
-  sendMessage(groupJid: string, text: string): boolean {
+  sendMessage(groupJid: string, threadTs: string, text: string): boolean {
     const state = this.getGroup(groupJid);
     if (!state.active || !state.groupFolder || state.isTaskContainer)
       return false;
-    state.idleWaiting = false; // Agent is about to receive work, no longer idle
+    state.idleWaiting = false;
 
-    const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
-    try {
-      fs.mkdirSync(inputDir, { recursive: true });
-      const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
-      const filepath = path.join(inputDir, filename);
-      const tempPath = `${filepath}.tmp`;
-      fs.writeFileSync(tempPath, JSON.stringify({ type: 'message', text }));
-      fs.renameSync(tempPath, filepath);
-      return true;
-    } catch {
+    return this.writeIPC(state.groupFolder, { type: 'message', threadTs, text });
+  }
+
+  /**
+   * Send a new thread request to the active container.
+   * Returns true if the message was written, false if no active container.
+   */
+  sendNewThread(groupJid: string, threadTs: string, text: string, sessionId?: string): boolean {
+    const state = this.getGroup(groupJid);
+    if (!state.active || !state.groupFolder || state.isTaskContainer)
       return false;
-    }
+    state.idleWaiting = false;
+
+    return this.writeIPC(state.groupFolder, { type: 'new_thread', threadTs, text, sessionId });
+  }
+
+  /**
+   * Signal the active container to shut down gracefully.
+   */
+  shutdownContainer(groupJid: string): void {
+    const state = this.getGroup(groupJid);
+    if (!state.active || !state.groupFolder) return;
+
+    this.writeIPC(state.groupFolder, { type: 'shutdown' });
   }
 
   /**
    * Signal the active container to wind down by writing a close sentinel.
+   * @deprecated Use shutdownContainer() for multi-session containers.
    */
   closeStdin(groupJid: string): void {
     const state = this.getGroup(groupJid);
@@ -190,6 +203,21 @@ export class GroupQueue {
       fs.writeFileSync(path.join(inputDir, '_close'), '');
     } catch {
       // ignore
+    }
+  }
+
+  private writeIPC(groupFolder: string, msg: Record<string, unknown>): boolean {
+    const inputDir = path.join(DATA_DIR, 'ipc', groupFolder, 'input');
+    try {
+      fs.mkdirSync(inputDir, { recursive: true });
+      const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
+      const filepath = path.join(inputDir, filename);
+      const tempPath = `${filepath}.tmp`;
+      fs.writeFileSync(tempPath, JSON.stringify(msg));
+      fs.renameSync(tempPath, filepath);
+      return true;
+    } catch {
+      return false;
     }
   }
 

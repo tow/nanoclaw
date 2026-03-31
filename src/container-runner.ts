@@ -43,13 +43,48 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  /** Thread identifier for multi-session containers. */
+  threadTs?: string;
 }
 
 export interface ContainerOutput {
+  type: 'result';
   status: 'success' | 'error';
   result: string | null;
   newSessionId?: string;
   error?: string;
+  /** Thread this output belongs to (for multi-session containers). */
+  threadTs?: string;
+}
+
+/** Lifecycle signals from long-lived containers (not query results). */
+export interface ContainerLifecycle {
+  type: 'lifecycle';
+  event: 'ready' | 'session_ended';
+  threadTs?: string;
+  newSessionId?: string;
+}
+
+/** IPC messages sent from host to container via filesystem. */
+export type IPCInput =
+  | { type: 'new_thread'; threadTs: string; text: string; sessionId?: string }
+  | { type: 'message'; threadTs: string; text: string }
+  | { type: 'close_thread'; threadTs: string }
+  | { type: 'shutdown' };
+
+/** Any message emitted by the container via stdout markers. */
+export type ContainerMessage = ContainerOutput | ContainerLifecycle;
+
+/** Handle to a running container for long-lived multi-session use. */
+export interface ContainerHandle {
+  process: ChildProcess;
+  containerName: string;
+  /** Send an IPC message to the container. */
+  sendIPC(msg: IPCInput): void;
+  /** Register a callback for each output marker from the container. */
+  onOutput(callback: (output: ContainerMessage) => Promise<void>): void;
+  /** Register a callback for when the container exits. */
+  onExit(callback: (code: number | null) => void): void;
 }
 
 interface VolumeMount {
@@ -192,6 +227,15 @@ function buildVolumeMounts(
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+
+  // Write tool allowlist into IPC dir (host-controlled, not editable by agent)
+  if (group.containerConfig?.allowedTools) {
+    fs.writeFileSync(
+      path.join(groupIpcDir, 'allowed-tools.json'),
+      JSON.stringify(group.containerConfig.allowedTools, null, 2),
+    );
+  }
+
   mounts.push({
     hostPath: groupIpcDir,
     containerPath: '/workspace/ipc',
@@ -528,6 +572,7 @@ export async function runContainerAgent(
           );
           outputChain.then(() => {
             resolve({
+              type: 'result',
               status: 'success',
               result: null,
               newSessionId,
@@ -542,6 +587,7 @@ export async function runContainerAgent(
         );
 
         resolve({
+          type: 'result',
           status: 'error',
           result: null,
           error: `Container timed out after ${configTimeout}ms`,
@@ -631,6 +677,7 @@ export async function runContainerAgent(
         );
 
         resolve({
+          type: 'result',
           status: 'error',
           result: null,
           error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
@@ -646,6 +693,7 @@ export async function runContainerAgent(
             'Container completed (streaming mode)',
           );
           resolve({
+            type: 'result',
             status: 'success',
             result: null,
             newSessionId,
@@ -696,6 +744,7 @@ export async function runContainerAgent(
         );
 
         resolve({
+          type: 'result',
           status: 'error',
           result: null,
           error: `Failed to parse container output: ${err instanceof Error ? err.message : String(err)}`,
@@ -710,12 +759,120 @@ export async function runContainerAgent(
         'Container spawn error',
       );
       resolve({
+        type: 'result',
         status: 'error',
         result: null,
         error: `Container spawn error: ${err.message}`,
       });
     });
   });
+}
+
+/**
+ * Start a long-lived container that supports multiple concurrent sessions.
+ * Returns a ContainerHandle for sending IPC messages and receiving output.
+ * The container stays alive until explicitly shut down or it self-exits.
+ */
+export async function startContainerAgent(
+  group: RegisteredGroup,
+  input: ContainerInput,
+  onProcess: (proc: ChildProcess, containerName: string) => void,
+): Promise<ContainerHandle> {
+  const groupDir = resolveGroupFolderPath(group.folder);
+  fs.mkdirSync(groupDir, { recursive: true });
+
+  const mounts = buildVolumeMounts(group, input.isMain);
+  const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
+  const containerName = `nanoclaw-${safeName}`;
+  const agentIdentifier = input.isMain
+    ? undefined
+    : group.folder.toLowerCase().replace(/_/g, '-');
+  const containerArgs = await buildContainerArgs(
+    mounts,
+    containerName,
+    agentIdentifier,
+  );
+
+  logger.info(
+    { group: group.name, containerName, mountCount: mounts.length },
+    'Starting long-lived container',
+  );
+
+  const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  onProcess(container, containerName);
+
+  // Write initial input to stdin and close it — all further communication is via IPC
+  container.stdin.write(JSON.stringify(input));
+  container.stdin.end();
+
+  // Output parsing state
+  let parseBuffer = '';
+  let outputCallback: ((output: ContainerMessage) => Promise<void>) | null = null;
+  let exitCallback: ((code: number | null) => void) | null = null;
+  let outputChain = Promise.resolve();
+
+  container.stdout.on('data', (data) => {
+    if (!outputCallback) return;
+    parseBuffer += data.toString();
+    let startIdx: number;
+    while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
+      const endIdx = parseBuffer.indexOf(OUTPUT_END_MARKER, startIdx);
+      if (endIdx === -1) break;
+      const jsonStr = parseBuffer
+        .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
+        .trim();
+      parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_MARKER.length);
+      try {
+        const parsed: ContainerMessage = JSON.parse(jsonStr);
+        const cb = outputCallback;
+        outputChain = outputChain.then(() => cb(parsed));
+      } catch (err) {
+        logger.warn({ group: group.name, error: err }, 'Failed to parse container output chunk');
+      }
+    }
+  });
+
+  container.stderr.on('data', (data) => {
+    const lines = data.toString().trim().split('\n');
+    for (const line of lines) {
+      if (line) logger.debug({ container: group.folder }, line);
+    }
+  });
+
+  container.on('close', (code) => {
+    logger.info({ group: group.name, containerName, code }, 'Long-lived container exited');
+    outputChain.then(() => exitCallback?.(code));
+  });
+
+  container.on('error', (err) => {
+    logger.error({ group: group.name, containerName, error: err }, 'Container spawn error');
+    exitCallback?.(-1);
+  });
+
+  // IPC send helper — writes a JSON file to the container's input directory
+  const groupIpcInputDir = path.join(resolveGroupIpcPath(group.folder), 'input');
+  fs.mkdirSync(groupIpcInputDir, { recursive: true });
+
+  return {
+    process: container,
+    containerName,
+    sendIPC(msg: IPCInput): void {
+      const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
+      const filepath = path.join(groupIpcInputDir, filename);
+      const tempPath = `${filepath}.tmp`;
+      fs.writeFileSync(tempPath, JSON.stringify(msg));
+      fs.renameSync(tempPath, filepath);
+    },
+    onOutput(callback: (output: ContainerMessage) => Promise<void>): void {
+      outputCallback = callback;
+    },
+    onExit(callback: (code: number | null) => void): void {
+      exitCallback = callback;
+    },
+  };
 }
 
 export function writeTasksSnapshot(

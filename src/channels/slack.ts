@@ -38,9 +38,8 @@ class SlackChannel implements Channel {
   private server: http.Server | null = null;
   private opts: ChannelOpts;
   private connected = false;
-  // Track the latest message ts per channel for reaction management
-  private pendingReactions = new Map<string, string>(); // jid -> message ts
-  private pendingThreads = new Map<string, string>(); // jid -> thread_ts to reply in
+  // Track pending reactions per thread: jid -> (threadTs -> messageTs)
+  private pendingReactions = new Map<string, Map<string, string>>();
 
   constructor(token: string, signingSecret: string, opts: ChannelOpts) {
     this.client = new WebClient(token);
@@ -112,13 +111,17 @@ class SlackChannel implements Channel {
     const timestamp = new Date(parseFloat(event.ts) * 1000).toISOString();
 
     // Add eyes reaction immediately
+    const threadTs = event.thread_ts || event.ts;
     try {
       await this.client.reactions.add({
         channel: event.channel,
         timestamp: event.ts,
         name: 'eyes',
       });
-      this.pendingReactions.set(chatJid, event.ts);
+      if (!this.pendingReactions.has(chatJid)) {
+        this.pendingReactions.set(chatJid, new Map());
+      }
+      this.pendingReactions.get(chatJid)!.set(threadTs, event.ts);
     } catch (err) {
       logger.warn({ err }, 'Failed to add eyes reaction');
     }
@@ -154,34 +157,43 @@ class SlackChannel implements Channel {
     this.opts.onMessage(chatJid, msg);
   }
 
-  private async removeEyesReaction(jid: string): Promise<void> {
-    const messageTs = this.pendingReactions.get(jid);
-    if (!messageTs) return;
+  private async removeEyesReaction(jid: string, threadTs?: string): Promise<void> {
+    const threadMap = this.pendingReactions.get(jid);
+    if (!threadMap) return;
+    // If threadTs given, remove reaction for that specific thread
+    // Otherwise remove all pending reactions for this channel (backward compat)
+    const entries = threadTs
+      ? [[threadTs, threadMap.get(threadTs)] as const].filter(([, v]) => v)
+      : [...threadMap.entries()];
     const channelId = jid.replace(SLACK_PREFIX, '');
-    try {
-      await this.client.reactions.remove({
-        channel: channelId,
-        timestamp: messageTs,
-        name: 'eyes',
-      });
-    } catch (err) {
-      logger.debug({ err }, 'Failed to remove eyes reaction');
+    for (const [tTs, messageTs] of entries) {
+      if (!messageTs) continue;
+      try {
+        await this.client.reactions.remove({
+          channel: channelId,
+          timestamp: messageTs,
+          name: 'eyes',
+        });
+      } catch (err) {
+        logger.debug({ err }, 'Failed to remove eyes reaction');
+      }
+      threadMap.delete(tTs);
     }
-    this.pendingReactions.delete(jid);
+    if (threadMap.size === 0) this.pendingReactions.delete(jid);
   }
 
   setReplyContext(jid: string, context: { threadTs: string; messageTs: string }): void {
-    this.pendingThreads.set(jid, context.threadTs);
-    // Update eyes reaction to point at the message being processed
-    this.pendingReactions.set(jid, context.messageTs);
+    if (!this.pendingReactions.has(jid)) {
+      this.pendingReactions.set(jid, new Map());
+    }
+    this.pendingReactions.get(jid)!.set(context.threadTs, context.messageTs);
   }
 
-  async sendMessage(jid: string, text: string): Promise<void> {
-    // Remove eyes reaction on first response
-    await this.removeEyesReaction(jid);
+  async sendMessage(jid: string, text: string, threadTs?: string): Promise<void> {
+    // Remove eyes reaction for this thread on first response
+    await this.removeEyesReaction(jid, threadTs);
 
     const channelId = jid.replace(SLACK_PREFIX, '');
-    const threadTs = this.pendingThreads.get(jid);
 
     const maxLen = 3900;
     const parts =

@@ -31,6 +31,7 @@ export interface ContainerConfig {
   projectPath?: string; // External repo to use as working directory (/workspace/group)
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
+  allowedTools?: string[]; // Tool allowlist for the agent (written to IPC, not accessible to agent)
 }
 
 export interface RegisteredGroup {
@@ -85,15 +86,14 @@ export interface TaskRunLog {
 export interface Channel {
   name: string;
   connect(): Promise<void>;
-  sendMessage(jid: string, text: string): Promise<void>;
+  sendMessage(jid: string, text: string, threadTs?: string): Promise<void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
-  // Optional: set the reply context for the next sendMessage call.
-  // The orchestrator calls this before processing each conversation unit
-  // so the channel knows where to direct responses (e.g. which Slack thread).
+  // Optional: track which message is being processed for a given thread.
+  // Used for reaction management (e.g. eyes reaction on the triggering message).
   setReplyContext?(jid: string, context: { threadTs: string; messageTs: string }): void;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;

@@ -151,6 +151,7 @@ describe('container-runner timeout behavior', () => {
 
     // Emit output with a result
     emitOutputMarker(fakeProc, {
+      type: 'result',
       status: 'success',
       result: 'Here is my response',
       newSessionId: 'session-123',
@@ -210,6 +211,7 @@ describe('container-runner timeout behavior', () => {
 
     // Emit output
     emitOutputMarker(fakeProc, {
+      type: 'result',
       status: 'success',
       result: 'Done',
       newSessionId: 'session-456',
