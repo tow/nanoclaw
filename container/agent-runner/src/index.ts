@@ -371,7 +371,8 @@ async function runSessionLoop(session: RunningSession, initialPrompt: string): P
 
     log(`[${session.threadTs}] Query done (${messageCount} messages)`);
 
-    if (shuttingDown || session.state === 'closing') break;
+    // State may have been set to 'closing' by dispatchIPC while query() was running
+    if (shuttingDown || (session.state as string) === 'closing') break;
 
     // Wait for next message from the session's stream
     session.state = 'idle';
