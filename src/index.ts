@@ -64,6 +64,7 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
+import { loadChannelsConfig, channelToGroup } from './channels-config.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -288,9 +289,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const sessionKey = `${group.folder}:${firstThreadTs}`;
     const sessionId = sessions[sessionKey];
 
-    channel.setReplyContext?.(chatJid, { threadTs: firstThreadTs, messageTs: firstUnit[0].id });
+    channel.setReplyContext?.(chatJid, {
+      threadTs: firstThreadTs,
+      messageTs: firstUnit[0].id,
+    });
 
-    handle = await startContainerForGroup(chatJid, group, firstThreadTs, prompt, sessionId);
+    handle = await startContainerForGroup(
+      chatJid,
+      group,
+      firstThreadTs,
+      prompt,
+      sessionId,
+    );
     units.delete(firstThreadTs); // Already sent as initial thread
   }
 
@@ -401,9 +411,10 @@ async function startContainerForGroup(
     }
 
     if (msg.result && threadTs && channel) {
-      const raw = typeof msg.result === 'string'
-        ? msg.result
-        : JSON.stringify(msg.result);
+      const raw =
+        typeof msg.result === 'string'
+          ? msg.result
+          : JSON.stringify(msg.result);
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       if (text) {
         await channel.sendMessage(chatJid, text, threadTs);
@@ -589,18 +600,27 @@ async function startMessageLoop(): Promise<void> {
               const threadTs = msg.thread_id || msg.id;
               const formatted = formatMessages([msg], TIMEZONE);
 
-              channel.setReplyContext?.(chatJid, { threadTs, messageTs: msg.id });
+              channel.setReplyContext?.(chatJid, {
+                threadTs,
+                messageTs: msg.id,
+              });
 
               if (threads.has(threadTs)) {
                 handle.sendIPC({ type: 'message', threadTs, text: formatted });
               } else {
                 const sessionKey = `${group.folder}:${threadTs}`;
-                handle.sendIPC({ type: 'new_thread', threadTs, text: formatted, sessionId: sessions[sessionKey] });
+                handle.sendIPC({
+                  type: 'new_thread',
+                  threadTs,
+                  text: formatted,
+                  sessionId: sessions[sessionKey],
+                });
                 threads.add(threadTs);
               }
             }
             activeThreads.set(chatJid, threads);
-            lastAgentTimestamp[chatJid] = groupMessages[groupMessages.length - 1].timestamp;
+            lastAgentTimestamp[chatJid] =
+              groupMessages[groupMessages.length - 1].timestamp;
             saveState();
           } else {
             queue.enqueueMessageCheck(chatJid);
@@ -646,6 +666,21 @@ async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
   loadState();
+
+  // Register groups from channels.yaml config file.
+  // Config-defined groups take precedence over DB-stored registrations.
+  const channelsConfig = loadChannelsConfig();
+  if (channelsConfig) {
+    for (const [jid, channelCfg] of Object.entries(channelsConfig.channels)) {
+      const repoCfg = channelsConfig.repos[channelCfg.repo];
+      const group = channelToGroup(jid, channelCfg, repoCfg);
+      registerGroup(jid, group);
+      logger.info(
+        { jid, name: channelCfg.name, repo: channelCfg.repo },
+        'Registered channel from config',
+      );
+    }
+  }
 
   // Ensure OneCLI agents exist for all registered groups.
   // Recovers from missed creates (e.g. OneCLI was down at registration time).

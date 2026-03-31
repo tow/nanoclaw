@@ -1,0 +1,44 @@
+# NanoClaw Channel Configuration
+#
+# Defines repos and how Slack channels map to them.
+# Place your copy at: ~/.config/nanoclaw/channels.yaml
+# or set NANOCLAW_CHANNELS_CONFIG=/path/to/channels.yaml
+
+repos:
+  prospecting:
+    path: /opt/nanoclaw/prospecting
+    allowedTools:
+      - "Bash(git *)"
+      - "Bash(python3 scripts/validate.py *)"
+      - "Read"
+      - "Write"
+      - "Edit"
+      - "Glob"
+      - "Grep"
+      - "WebSearch"
+      - "WebFetch"
+      - "Skill"
+      - "ToolSearch"
+      - "NotebookEdit"
+      - "mcp__nanoclaw__*"
+
+  # Example: another repo with different permissions
+  # allthecode:
+  #   path: /opt/nanoclaw/allthecode
+  #   allowedTools:
+  #     - "Read"
+  #     - "Glob"
+  #     - "Grep"
+  #     - "WebSearch"
+
+channels:
+  # Dedicated channel — every message gets a response
+  slack:CXXXXXXXXXX:          # Replace with actual #crm-inbox channel ID
+    name: crm-inbox
+    repo: prospecting
+
+  # Example: shared channel — bot only responds when triggered
+  # slack:CYYYYYYYYYY:
+  #   name: general
+  #   repo: prospecting
+  #   trigger: "@rex"
